@@ -89,9 +89,22 @@
   footer{padding:18px 22px;color:var(--muted);font-size:12px;text-align:center;border-top:1px solid var(--line);margin-top:8px}
   a{color:var(--accent)}
   .err{color:#ff8c8c;font-size:13px}
+  /* full-screen loading overlay */
+  #overlay{position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;
+    flex-direction:column;gap:16px;background:rgba(6,12,22,.78);backdrop-filter:blur(3px)}
+  #overlay.show{display:flex}
+  .spinner{width:62px;height:62px;border-radius:50%;
+    border:6px solid rgba(78,161,255,.18);border-top-color:var(--accent);
+    animation:spin .8s linear infinite;position:relative}
+  .spinner::after{content:"✈️";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    font-size:22px;animation:spin .8s linear infinite reverse}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  #overlay .ldtxt{color:var(--txt);font-size:14px;letter-spacing:.4px}
 </style>
 </head>
 <body>
+<div id="overlay"><div class="spinner"></div><div class="ldtxt" id="ldtxt">Fetching live weather…</div></div>
+
 <header>
   <div>
     <h1><span class="ico">✈️</span>to fly or not to fly</h1>
@@ -245,7 +258,14 @@ async function getJSON(url){
   throw lastErr || new Error("all sources failed");
 }
 const ids = STATIONS.map(s=>s.icao).join(",");
+function showOverlay(on,msg){
+  const o=$("overlay"); if(msg) $("ldtxt").textContent=msg;
+  o.classList.toggle("show", on);
+}
+let loading=false;
 async function loadData(){
+  if(loading) return; loading=true;
+  showOverlay(true,"Fetching live weather…");
   setStatus(true,"Fetching METARs & TAFs…");
   try{
     const [m,t] = await Promise.all([
@@ -266,6 +286,9 @@ async function loadData(){
       '<p class="hint">This usually happens when the page is opened straight off disk (a <code>file://</code> address) or behind a firewall/ad-blocker that blocks the proxies. The most reliable fix is to serve it over http:</p>'+
       '<div class="raw">cd to the folder, then run one of:\n\npython3 -m http.server 8080\n   (or)\nnpx serve .\n\nthen open  http://localhost:8080/to-fly-or-not-to-fly.html</div>'+
       '<p class="hint">A browser ad-blocker can also block <code>corsproxy.io</code>/<code>allorigins</code> — pausing it for this page, or using the local-server method above, resolves it.</p></div>';
+  } finally {
+    loading=false;
+    showOverlay(false);
   }
 }
 function setStatus(ok,msg){
@@ -314,7 +337,6 @@ function decodeTafLine(f){
 }
 
 // ---------- go / no-go assessment (light aircraft, day VFR) ----------
-// thresholds: [cautionAt, nogoAt]
 const LIMITS = {
   visKm:  {good:8,  nogo:5},     // >=8 good, 5-8 caution, <5 no-go
   ceilFt: {good:1500, nogo:1000},// >=1500 good, 1000-1500 caution, <1000 no-go
@@ -322,7 +344,6 @@ const LIMITS = {
   gust:   {caution:25, nogo:35},
   xwind:  {caution:12, nogo:18}  // best-runway crosswind kt
 };
-const LV = ["GO","CAUTION","NOGO"];
 function visToKm(v){ if(v==null) return null; if(v==="6+"||v==="10+") return 16; const n=parseFloat(v); return isNaN(n)?null:n*1.609; }
 function ceilFromClouds(cl){
   if(!cl||!cl.length) return null;
@@ -338,17 +359,14 @@ function hasWx(s,re){ return s && re.test(s); }
 function evalCond(c){
   let lvl=0; const reasons=[];
   const bump=(l,t)=>{ if(l>lvl) lvl=l; reasons.push({lvl:l,txt:t}); };
-  // visibility
   if(c.visKm!=null){
     if(c.visKm < LIMITS.visKm.nogo) bump(2,"Visibility "+Math.round(c.visKm)+" km (below 5 km VFR)");
     else if(c.visKm < LIMITS.visKm.good) bump(1,"Visibility "+Math.round(c.visKm)+" km (marginal)");
   }
-  // ceiling
   if(c.ceilFt!=null){
     if(c.ceilFt < LIMITS.ceilFt.nogo) bump(2,"Ceiling "+c.ceilFt+" ft (below 1000 ft)");
     else if(c.ceilFt < LIMITS.ceilFt.good) bump(1,"Ceiling "+c.ceilFt+" ft (low)");
   }
-  // wind
   if(c.wspd!=null){
     if(c.wspd > LIMITS.wind.nogo) bump(2,"Wind "+c.wspd+" kt (strong)");
     else if(c.wspd > LIMITS.wind.caution) bump(1,"Wind "+c.wspd+" kt");
@@ -358,13 +376,11 @@ function evalCond(c){
     else if(c.wgst > LIMITS.gust.caution) bump(1,"Gusts "+c.wgst+" kt");
     else if(c.wgst-(c.wspd||0) >= 10) bump(1,"Gusty (spread "+(c.wgst-(c.wspd||0))+" kt)");
   }
-  // crosswind (best runway)
   const xw = bestCrosswind(c.wdir,c.wgst||c.wspd||0);
   if(xw!=null){
     if(xw > LIMITS.xwind.nogo) bump(2,"Crosswind ≥"+Math.round(xw)+" kt both runways");
     else if(xw > LIMITS.xwind.caution) bump(1,"Crosswind ~"+Math.round(xw)+" kt");
   }
-  // significant weather
   if(hasWx(c.wx,/TS|CB/)) bump(2,"Thunderstorm / CB");
   else if(hasWx(c.wx,/\+(RA|SHRA|TSRA)|GR|FC/)) bump(2,"Heavy precip / hazard");
   else if(hasWx(c.wx,/FG|FZ/)) bump(2,"Fog / freezing");
@@ -382,4 +398,207 @@ function condFromTaf(f){
     wx:(f.wxString||"")};
 }
 function renderVerdict(){
-  const box=$("verdict"), badge=$("verdictBadge"), title
+  const box=$("verdict"), badge=$("verdictBadge"), title=$("verdictTitle"),
+        reasonsEl=$("verdictReasons"), tl=$("verdictTimeline");
+  const m=metars[VERDICT_STATION], t=tafs[VERDICT_STATION];
+  if(!m && !t){
+    box.className="verdict NA"; badge.innerHTML="N/A<small>NEXT 3 H</small>";
+    title.textContent="No data to assess the next 3 hours.";
+    reasonsEl.textContent="King Shaka (FALE) report unavailable. Refresh, or brief from official sources.";
+    tl.innerHTML=""; return;
+  }
+  const now=Date.now(), endT=now+VERDICT_HOURS*3600*1000;
+  const snaps=[];
+  if(m) snaps.push({t:"Now (METAR)", epoch:now, c:condFromMetar(m)});
+  if(t&&t.fcsts){
+    t.fcsts.forEach(f=>{
+      const a=f.timeFrom*1000, b=f.timeTo*1000;
+      if(b>now && a<endT){
+        const tag=f.fcstChange?(f.fcstChange+" "):(f.probability?("PROB"+f.probability+" "):"");
+        snaps.push({t:tag+fmtZ(f.timeFrom)+"–"+fmtZ(f.timeTo), epoch:Math.max(a,now), c:condFromTaf(f), prob:f.probability});
+      }
+    });
+  }
+  let worst=0; const allReasons=[];
+  snaps.forEach(s=>{ const e=evalCond(s.c); s.eval=e; if(e.lvl>worst) worst=e.lvl;
+    e.reasons.forEach(r=>{ if(!allReasons.some(x=>x.txt===r.txt)) allReasons.push(r); }); });
+  const cls=["GO","CAUTION","NOGO"][worst];
+  box.className="verdict "+cls;
+  const words={GO:"GO",CAUTION:"CAUTION",NOGO:"NO-GO"};
+  badge.innerHTML=words[cls]+"<small>NEXT 3 H · VFR</small>";
+  const headline={GO:"Conditions look suitable for light-aircraft day VFR.",
+    CAUTION:"Flyable but marginal — review the limiting factors below.",
+    NOGO:"Not recommended for light-aircraft day VFR in this window."};
+  title.textContent=headline[cls];
+  if(allReasons.length){
+    const sorted=allReasons.sort((a,b)=>b.lvl-a.lvl);
+    reasonsEl.innerHTML="<ul>"+sorted.map(r=>{
+      const cl=r.lvl===2?"bad":r.lvl===1?"warn":"ok"; return `<li class="${cl}">${r.txt}</li>`;
+    }).join("")+"</ul>";
+  } else {
+    reasonsEl.innerHTML="<ul><li class='ok'>Good visibility, ceiling clear, light winds, no significant weather forecast.</li></ul>";
+  }
+  tl.innerHTML="";
+  for(let h=0;h<=VERDICT_HOURS;h++){
+    const tEpoch=now+h*3600*1000;
+    let cand=snaps.filter(s=>s.epoch<=tEpoch+1).sort((a,b)=>b.epoch-a.epoch)[0] || snaps[0];
+    let lvl=cand?cand.eval.lvl:0;
+    const cls2=["GO","CAUTION","NOGO"][lvl];
+    const lbl=h===0?"Now":"+"+h+"h";
+    const zt=fmtZ(Math.floor(tEpoch/1000));
+    tl.insertAdjacentHTML("beforeend",
+      `<div class="tl ${cls2}"><div class="t">${lbl} · ${zt}</div><div class="lv">${({GO:"GO",CAUTION:"Caution",NOGO:"No-go"})[cls2]}</div></div>`);
+  }
+}
+
+// ---------- render ----------
+function catClass(c){ return ["VFR","MVFR","IFR","LIFR"].includes(c)?c:"NA"; }
+function render(){
+  const wrap = $("stations"); wrap.innerHTML="";
+  STATIONS.forEach(s=>{
+    const m = metars[s.icao], t = tafs[s.icao];
+    const cat = m? catClass(m.fltCat) : "NA";
+    const a = ageStr(m? m.reportTime : null);
+    let html = `<div class="card">
+      <div class="station-head">
+        <span class="icao">${s.icao}</span>
+        <span class="name">${s.label}</span>
+        <span class="cat ${cat}">${m?m.fltCat:"NO RPT"}</span>
+      </div>`;
+    if(m){
+      html += `<div class="age ${a.stale?'stale':''}">METAR · ${a.txt}</div>`;
+      html += `<div class="raw">${m.rawOb}</div>`;
+      html += `<table>`+decodeMetar(m).map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join("")+`</table>`;
+    } else {
+      html += `<div class="age stale">No current METAR for this station.</div>`;
+    }
+    if(t){
+      html += `<div class="age" style="margin-top:12px">TAF · issued ${fmtZ(t.issueTime?Date.parse(t.issueTime)/1000:t.bulletinTime?Date.parse(t.bulletinTime)/1000:0)}</div>`;
+      html += `<div class="raw">${t.rawTAF}</div>`;
+      html += `<div class="decoded">`+ (t.fcsts||[]).map(f=>{const d=decodeTafLine(f);return `<div class="taf-line"><b>${d.head}</b><br>${d.body}</div>`;}).join("") +`</div>`;
+    } else if(m){
+      html += `<div class="age stale" style="margin-top:12px">No TAF issued for this station.</div>`;
+    }
+    html += `</div>`;
+    wrap.insertAdjacentHTML("beforeend", html);
+  });
+
+  const sel = $("windStn");
+  const withWind = STATIONS.filter(s=>metars[s.icao]);
+  if(sel.options.length===0 || ![...sel.options].some(o=>o.value)){
+    sel.innerHTML="";
+    (withWind.length?withWind:STATIONS).forEach(s=>{
+      const o=document.createElement("option"); o.value=s.icao; o.textContent=s.icao+" — "+s.label; sel.appendChild(o);
+    });
+    sel.onchange=()=>{renderWind(); renderDA();};
+  }
+  renderWind(); renderDA(); renderSun(); renderVerdict();
+}
+
+function renderWind(){
+  const icao = $("windStn").value;
+  const m = metars[icao];
+  const sumEl=$("windSummary"), tbl=$("xwTable");
+  if(!m){ sumEl.textContent="No wind data."; tbl.innerHTML=""; drawCompass(null); return; }
+  sumEl.innerHTML = "<b>"+windText(m)+"</b>";
+  const wd = (m.wdir==="VRB"||m.wdir==null)? null : m.wdir;
+  const ws = m.wspd||0, wg = m.wgst||ws;
+  drawCompass(wd);
+  if(wd===null){ tbl.innerHTML="<tr><td colspan=2>Wind variable — components not meaningful.</td></tr>"; return; }
+  let rows="<tr><td><b>Runway</b></td><td><b>Headwind</b></td><td><b>Crosswind</b></td></tr>";
+  RWYS.forEach(r=>{
+    const ang = (wd - r.hdgTrue)*Math.PI/180;
+    const hw = Math.round(Math.cos(ang)*ws);
+    const xw = Math.round(Math.sin(ang)*ws);
+    const xwGust = Math.round(Math.sin(ang)*wg);
+    const dir = xw>0? "from right" : xw<0? "from left":"";
+    const hwTxt = hw>=0? hw+" kt HW" : (-hw)+" kt TAIL";
+    rows += `<tr><td>RWY ${r.name}</td><td class="${hw<0?'warn':''}">${hwTxt}</td>`+
+            `<td>${Math.abs(xw)} kt ${dir}${wg>ws?` (g${Math.abs(xwGust)})`:''}</td></tr>`;
+  });
+  tbl.innerHTML=rows;
+}
+
+function drawCompass(wd){
+  const svg=$("compass"); const cx=60,cy=60,r=46;
+  let s=`<circle cx="${cx}" cy="${cy}" r="${r}" fill="#0f1d30" stroke="#24405f"/>`;
+  // runway line 05/23 (drawn in TRUE orientation, since the compass & wind are TRUE-referenced)
+  const rh=(50-VAR_W)*Math.PI/180;
+  s+=`<line x1="${cx-Math.sin(rh)*r}" y1="${cy+Math.cos(rh)*r}" x2="${cx+Math.sin(rh)*r}" y2="${cy-Math.cos(rh)*r}" stroke="#4ea1ff" stroke-width="7" stroke-linecap="round" opacity=".55"/>`;
+  ["N","E","S","W"].forEach((c,i)=>{const a=i*90*Math.PI/180;s+=`<text x="${cx+Math.sin(a)*(r-9)}" y="${cy-Math.cos(a)*(r-9)+4}" fill="#8aa4c2" font-size="9" text-anchor="middle">${c}</text>`;});
+  if(wd!=null){
+    const tx=cx+Math.sin((wd)*Math.PI/180)*(r-4), ty=cy-Math.cos((wd)*Math.PI/180)*(r-4);
+    s+=`<line x1="${cx}" y1="${cy}" x2="${tx}" y2="${ty}" stroke="#ff5d5d" stroke-width="3"/>`;
+    s+=`<circle cx="${cx}" cy="${cy}" r="3" fill="#ff5d5d"/>`;
+  }
+  svg.innerHTML=s;
+}
+
+function renderDA(){
+  const icao=$("windStn").value, m=metars[icao];
+  if(!m||m.altim==null||m.temp==null){
+    $("daVal").textContent="—";$("paVal").textContent="—";$("tdVal").textContent="—";$("qnhVal").textContent="—";return;
+  }
+  const qnh=m.altim, oat=m.temp, elev=VG.elevFt;
+  const pa = elev + (1013.25-qnh)*27;           // ~27 ft per hPa
+  const isa = 15 - 1.98*(pa/1000);
+  const da = Math.round(pa + 120*(oat-isa));
+  $("paVal").textContent=Math.round(pa)+" ft";
+  $("daVal").textContent=da+" ft";
+  $("tdVal").textContent=oat+" / "+(m.dewp!=null?m.dewp:"—")+" °C";
+  $("qnhVal").textContent=Math.round(qnh)+" hPa";
+  $("daHint").textContent="From "+icao+" QNH "+Math.round(qnh)+" hPa & "+oat+"°C at field elev "+elev+" ft. Higher DA = degraded performance.";
+}
+
+// ---------- sun times (NOAA algorithm) ----------
+function sunTimes(date,lat,lon,zenith){
+  const rad=Math.PI/180, deg=180/Math.PI;
+  const N = Math.floor((Date.UTC(date.getUTCFullYear(),date.getUTCMonth(),date.getUTCDate())-Date.UTC(date.getUTCFullYear(),0,0))/86400000);
+  function calc(rising){
+    const lngHour=lon/15;
+    const t = N + ((rising?6:18)-lngHour)/24;
+    const M = 0.9856*t - 3.289;
+    let L = M + 1.916*Math.sin(M*rad) + 0.020*Math.sin(2*M*rad) + 282.634;
+    L=(L+360)%360;
+    let RA = deg*Math.atan(0.91764*Math.tan(L*rad)); RA=(RA+360)%360;
+    RA += (Math.floor(L/90)*90 - Math.floor(RA/90)*90);
+    RA/=15;
+    const sinDec=0.39782*Math.sin(L*rad), cosDec=Math.cos(Math.asin(sinDec));
+    const cosH=(Math.cos(zenith*rad)-sinDec*Math.sin(lat*rad))/(cosDec*Math.cos(lat*rad));
+    if(cosH>1||cosH<-1) return null;
+    let H = rising? 360-deg*Math.acos(cosH) : deg*Math.acos(cosH);
+    H/=15;
+    let T = H + RA - 0.06571*t - 6.622;
+    let UT=(T-lngHour)%24; UT=(UT+24)%24;
+    return UT;
+  }
+  return {rise:calc(true), set:calc(false)};
+}
+function utToSAST(ut){ if(ut==null) return "—"; let h=ut+2; h=(h+24)%24; const hh=Math.floor(h), mm=Math.round((h-hh)*60); return pad(hh)+":"+pad(mm); }
+function renderSun(){
+  const now=new Date();
+  const off=sunTimes(now,VG.lat,VG.lon,90.833);  // official sunrise/sunset
+  const civ=sunTimes(now,VG.lat,VG.lon,96);       // civil twilight
+  const tbl=$("sunTable");
+  const rise=off.rise, set=off.set;
+  let dayLen="—";
+  if(rise!=null&&set!=null){ let d=(set-rise+24)%24; dayLen=Math.floor(d)+"h "+pad(Math.round((d-Math.floor(d))*60))+"m"; }
+  tbl.innerHTML=
+    `<tr><td>First light (civil)</td><td>${utToSAST(civ.rise)}</td></tr>`+
+    `<tr><td>Sunrise</td><td>${utToSAST(rise)}</td></tr>`+
+    `<tr><td>Sunset</td><td>${utToSAST(set)}</td></tr>`+
+    `<tr><td>Last light (civil)</td><td>${utToSAST(civ.set)}</td></tr>`+
+    `<tr><td>Daylight</td><td>${dayLen}</td></tr>`;
+}
+
+// ---------- wiring ----------
+$("refreshBtn").onclick=()=>loadData();
+let timer=null;
+function arm(){ if(timer) clearInterval(timer); if($("autoChk").checked) timer=setInterval(loadData,REFRESH_MS); }
+$("autoChk").onchange=arm;
+loadData(); arm();
+// refresh when tab regains focus (components update on their own cadence)
+document.addEventListener("visibilitychange",()=>{ if(!document.hidden) loadData(); });
+</script>
+</body>
+</html>
