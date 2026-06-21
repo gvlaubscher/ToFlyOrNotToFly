@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>to fly or not to fly</title>
+<title>Go / No-Go</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%88%EF%B8%8F%3C/text%3E%3C/svg%3E">
 <style>
   :root{
@@ -67,6 +67,22 @@
   .compass{flex:0 0 130px}
   .hint{color:var(--muted);font-size:12px;margin-top:8px}
   .warn{color:#ffb454}
+  #mgramWrap{overflow-x:auto;overflow-y:hidden;border:1px solid var(--line);border-radius:10px;background:#0c1726}
+  table.mg{border-collapse:collapse;font-size:11px;white-space:nowrap;color:#cfe0f2}
+  table.mg td,table.mg th{padding:2px 7px;text-align:center;border-right:1px solid #142944;line-height:1.45}
+  table.mg th.rowlbl{position:sticky;left:0;background:#0c1726;text-align:right;color:#8aa4c2;font-weight:600;border-right:1px solid #24405f;z-index:2}
+  table.mg td.now{background:rgba(78,161,255,.16)}
+  table.mg td.daysep{border-left:2px solid #2e4d70}
+  table.mg .war{display:inline-block;margin-right:2px;color:#9fd0ff}
+  table.mg tr.day td{color:#e8f0fa;font-weight:700;text-align:left;font-size:10px}
+  table.mg tr.hr td{color:#8aa4c2;font-size:10px}
+  table.mg tr.sky td{font-size:13px}
+  table.mg tr.temp td{color:#ff9a6a;font-weight:600}
+  table.mg tr.dew td{color:#7fb0d8}
+  table.mg tr.gust td{color:#ffc880}
+  table.mg tr.pres td{color:#a9bdd1}
+  table.mg tr.rain td{color:#5aa6ff}
+  table.mg tr.cloud td,table.mg tr.base td{color:#9aa9bb}
   .verdict{border-radius:16px;padding:18px 20px;margin-bottom:18px;border:1px solid var(--line);
     display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap}
   .verdict .badge{font-size:30px;font-weight:800;letter-spacing:.5px;padding:10px 20px;border-radius:12px;color:#04101f;white-space:nowrap}
@@ -107,7 +123,7 @@
 
 <header>
   <div>
-    <h1><span class="ico">✈️</span>to fly or not to fly</h1>
+    <h1><span class="ico">✈️</span>Go / No-Go</h1>
     <div class="sub">Virginia Airport · FAVG · Durban, South Africa · elev 20 ft · RWY 05/23</div>
   </div>
   <div class="clocks">
@@ -182,6 +198,13 @@
     </div>
   </div>
 
+  <div class="card" id="mgramCard" style="margin-top:16px">
+    <h2>Meteogram — Virginia (FAVG) · ECMWF</h2>
+    <div id="mgramMeta" class="decoded" style="margin-bottom:6px">Loading forecast…</div>
+    <div id="mgramWrap"></div>
+    <div class="hint">Hourly ECMWF forecast (via Open-Meteo) in local SAST — scroll sideways for later hours; the current hour is highlighted. Pressure in mmHg, ↑ points the way the wind is blowing, cloud base is an estimate. <a href="https://www.windy.com/-29.733/31.209/meteogram?-29.863,31.058,11,p:wind" target="_blank" rel="noopener">Open the full meteogram on Windy ↗</a></div>
+  </div>
+
   <h2 style="margin:24px 2px 6px;color:var(--muted);font-size:13px;letter-spacing:.7px;text-transform:uppercase">METAR &amp; TAF</h2>
   <div class="grid" id="stations"></div>
 
@@ -208,12 +231,14 @@ const RWYS = [{name:"05", hdgMag:50, hdgTrue:50-VAR_W},{name:"23", hdgMag:230, h
 const VERDICT_STATION = "FALE";   // nearest station with a TAF (King Shaka)
 const VERDICT_HOURS = 3;
 const REFRESH_MS = 5*60*1000;
+const MG = {lat:-29.771, lon:31.058};
 
 let metars = {}, tafs = {};
 
 // ---------- helpers ----------
 const $ = id => document.getElementById(id);
 const pad = n => String(n).padStart(2,"0");
+const hpaToMmhg = h => (h==null?null:Math.round(h*0.750062));   // QNH hPa -> mmHg
 function clocks(){
   const now = new Date();
   const z = new Date(now.getTime());
@@ -236,14 +261,17 @@ function withTimeout(p, ms){
   return Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error("timeout")),ms))]);
 }
 // each entry builds a request URL and extracts JSON from the (possibly wrapped) response
+const isLocalHost = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
 const PROXIES = [
-  {name:"local",        url:u=>"/proxy?url="+encodeURIComponent(u),                            parse:async r=>r.json()},
   {name:"direct",       url:u=>u,                                                              parse:async r=>r.json()},
   {name:"corsproxy.io", url:u=>"https://corsproxy.io/?url="+encodeURIComponent(u),             parse:async r=>r.json()},
   {name:"codetabs",     url:u=>"https://api.codetabs.com/v1/proxy/?quest="+u,                  parse:async r=>r.json()},
   {name:"allorigins",   url:u=>"https://api.allorigins.win/get?url="+encodeURIComponent(u),    parse:async r=>JSON.parse((await r.json()).contents)},
   {name:"isomorphic",   url:u=>"https://cors.isomorphic-git.org/"+u,                            parse:async r=>r.json()}
 ];
+// served by the local PowerShell launcher? the same-origin proxy is fastest there, so try it first.
+// on a hosted (https) site this path 404s, so we skip it to avoid a wasted round-trip.
+if(isLocalHost) PROXIES.unshift({name:"local", url:u=>"/proxy?url="+encodeURIComponent(u), parse:async r=>r.json()});
 async function getJSON(url){
   let lastErr;
   for(const p of PROXIES){
@@ -262,11 +290,67 @@ function showOverlay(on,msg){
   const o=$("overlay"); if(msg) $("ldtxt").textContent=msg;
   o.classList.toggle("show", on);
 }
+async function refreshMeteogram(){
+  const wrap=$("mgramWrap"); if(!wrap) return;
+  try{
+    const url="https://api.open-meteo.com/v1/forecast?latitude="+MG.lat+"&longitude="+MG.lon+
+      "&hourly=temperature_2m,dew_point_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation,cloud_cover,pressure_msl"+
+      "&wind_speed_unit=kn&timeformat=unixtime&forecast_days=3";
+    const d=await getJSON(url);
+    drawMeteogram(d.hourly||{});
+  }catch(e){ const m=$("mgramMeta"); if(m) m.innerHTML="<span class='warn'>Meteogram unavailable right now — will retry on next refresh.</span>"; }
+}
+function drawMeteogram(h){
+  const wrap=$("mgramWrap"); if(!wrap||!h.time) return;
+  const now=Date.now()/1000;
+  let i0=h.time.findIndex(t=>t>=now-1800); if(i0<0) i0=0;
+  const N=48, end=Math.min(h.time.length, i0+N), cols=[];
+  for(let j=i0;j<end;j++) cols.push(j);
+  if(!cols.length) return;
+  const fin=v=>Number.isFinite(v);
+  const A=(arr,j)=> (arr&&fin(arr[j]))?arr[j]:null;
+  const sky=(cl,rn)=> rn>0.2?"🌧":cl==null?"·":cl<15?"☀":cl<55?"⛅":"☁";
+  const arr=d=> fin(d)?`<span class="war" style="transform:rotate(${Math.round(d+180)}deg)">↑</span>`:"";
+  const sast=ts=>{ const d=new Date((ts+7200)*1000);
+    return {h:d.getUTCHours(), wd:["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][d.getUTCDay()], dd:d.getUTCDate(), key:d.getUTCMonth()+"-"+d.getUTCDate()}; };
+  const L=t=>`<th class="rowlbl">${t}</th>`;
+  let rDay=L("Date"),rHr=L("Hour"),rSky=L("Sky"),rT=L("Temp °C"),rDw=L("Dew °C"),
+      rW=L("Wind kt"),rG=L("Gust kt"),rP=L("QNH mmHg"),rR=L("Rain mm"),rC=L("Cloud %"),rB=L("Base m");
+  let lastKey="";
+  cols.forEach((j,k)=>{
+    const s=sast(h.time[j]); const newDay=s.key!==lastKey; lastKey=s.key;
+    const cls=`class="${k===0?"now":""}${(newDay&&k>0)?" daysep":""}"`;
+    const cl=A(h.cloud_cover,j), rn=A(h.precipitation,j)||0, t=A(h.temperature_2m,j), dw=A(h.dew_point_2m,j);
+    rDay+=`<td ${cls}>${(newDay||k===0)?s.wd+" "+s.dd:""}</td>`;
+    rHr +=`<td ${cls}>${String(s.h).padStart(2,"0")}</td>`;
+    rSky+=`<td ${cls}>${sky(cl,rn)}</td>`;
+    rT  +=`<td ${cls}>${t==null?"–":Math.round(t)}</td>`;
+    rDw +=`<td ${cls}>${dw==null?"–":Math.round(dw)}</td>`;
+    rW  +=`<td ${cls}>${arr(A(h.wind_direction_10m,j))}${A(h.wind_speed_10m,j)==null?"–":Math.round(A(h.wind_speed_10m,j))}</td>`;
+    rG  +=`<td ${cls}>${A(h.wind_gusts_10m,j)==null?"–":Math.round(A(h.wind_gusts_10m,j))}</td>`;
+    rP  +=`<td ${cls}>${A(h.pressure_msl,j)==null?"–":hpaToMmhg(A(h.pressure_msl,j))}</td>`;
+    rR  +=`<td ${cls}>${rn>0?rn.toFixed(1):""}</td>`;
+    rC  +=`<td ${cls}>${cl==null?"–":Math.round(cl)}</td>`;
+    let base=""; if(t!=null&&dw!=null&&cl!=null&&cl>=40) base=Math.max(0,Math.round(125*(t-dw)/50)*50);
+    rB  +=`<td ${cls}>${base}</td>`;
+  });
+  wrap.innerHTML=`<table class="mg"><tbody>`+
+    `<tr class="day">${rDay}</tr><tr class="hr">${rHr}</tr><tr class="sky">${rSky}</tr>`+
+    `<tr class="temp">${rT}</tr><tr class="dew">${rDw}</tr><tr class="wind">${rW}</tr>`+
+    `<tr class="gust">${rG}</tr><tr class="pres">${rP}</tr><tr class="rain">${rR}</tr>`+
+    `<tr class="cloud">${rC}</tr><tr class="base">${rB}</tr></tbody></table>`;
+  const t0=A(h.temperature_2m,cols[0]), w0=A(h.wind_speed_10m,cols[0]), g0=A(h.wind_gusts_10m,cols[0]), p0=A(h.pressure_msl,cols[0]);
+  const meta=$("mgramMeta");
+  if(meta) meta.innerHTML="<b>Now:</b> "+(t0==null?"–":Math.round(t0)+"°C")+
+    " · wind "+(w0==null?"–":Math.round(w0))+(g0==null?"":" g"+Math.round(g0))+" kt"+
+    (p0==null?"":" · QNH "+hpaToMmhg(p0)+" mmHg")+" · model ECMWF";
+}
 let loading=false;
 async function loadData(){
   if(loading) return; loading=true;
-  showOverlay(true,"Fetching live weather…");
-  setStatus(true,"Fetching METARs & TAFs…");
+  const haveData = Object.keys(metars).length>0;
+  if(!haveData) showOverlay(true,"Fetching live weather…");   // full overlay only on first load
+  setStatus(true, haveData?"Refreshing…":"Fetching METARs & TAFs…");
   try{
     const [m,t] = await Promise.all([
       getJSON("https://aviationweather.gov/api/data/metar?ids="+ids+"&format=json"),
@@ -276,9 +360,11 @@ async function loadData(){
     (m||[]).forEach(o=>metars[o.icaoId]=o);
     (t||[]).forEach(o=>tafs[o.icaoId]=o);
     render();
+    refreshMeteogram();
     setStatus(true,"Live");
     $("lastUpd").textContent = "Last updated "+new Date().toLocaleTimeString();
     $("errBox").innerHTML="";
+    try{ localStorage.setItem("flywx",JSON.stringify({metars,tafs,ts:Date.now()})); }catch(e){}
   }catch(e){
     setStatus(false,"Could not reach weather service");
     $("errBox").innerHTML='<div class="card" style="border-color:#7a2f2f"><p class="err">'+
@@ -318,7 +404,7 @@ function decodeMetar(o){
   t.push(["Cloud", cloudText(o.clouds)]);
   if(o.temp!=null) t.push(["Temperature", o.temp+" °C"]);
   if(o.dewp!=null) t.push(["Dewpoint", o.dewp+" °C"]);
-  if(o.altim!=null) t.push(["QNH", Math.round(o.altim)+" hPa"]);
+  if(o.altim!=null) t.push(["QNH", hpaToMmhg(o.altim)+" mmHg ("+Math.round(o.altim)+" hPa)"]);
   return t;
 }
 function fmtZ(epoch){ const d=new Date(epoch*1000); return pad(d.getUTCDate())+" "+pad(d.getUTCHours())+pad(d.getUTCMinutes())+"Z"; }
@@ -546,8 +632,8 @@ function renderDA(){
   $("paVal").textContent=Math.round(pa)+" ft";
   $("daVal").textContent=da+" ft";
   $("tdVal").textContent=oat+" / "+(m.dewp!=null?m.dewp:"—")+" °C";
-  $("qnhVal").textContent=Math.round(qnh)+" hPa";
-  $("daHint").textContent="From "+icao+" QNH "+Math.round(qnh)+" hPa & "+oat+"°C at field elev "+elev+" ft. Higher DA = degraded performance.";
+  $("qnhVal").textContent=hpaToMmhg(qnh)+" mmHg";
+  $("daHint").textContent="From "+icao+" QNH "+hpaToMmhg(qnh)+" mmHg ("+Math.round(qnh)+" hPa) & "+oat+"°C at field elev "+elev+" ft. Higher DA = degraded performance.";
 }
 
 // ---------- sun times (NOAA algorithm) ----------
@@ -596,6 +682,13 @@ $("refreshBtn").onclick=()=>loadData();
 let timer=null;
 function arm(){ if(timer) clearInterval(timer); if($("autoChk").checked) timer=setInterval(loadData,REFRESH_MS); }
 $("autoChk").onchange=arm;
+// instant display from last cached data, then refresh live in the background
+try{
+  const cached=JSON.parse(localStorage.getItem("flywx")||"null");
+  if(cached && cached.metars){ metars=cached.metars; tafs=cached.tafs||{}; render();
+    setStatus(true,"Showing last data — refreshing…"); $("lastUpd").textContent="Cached "+new Date(cached.ts).toLocaleTimeString(); }
+}catch(e){}
+refreshMeteogram();
 loadData(); arm();
 // refresh when tab regains focus (components update on their own cadence)
 document.addEventListener("visibilitychange",()=>{ if(!document.hidden) loadData(); });
