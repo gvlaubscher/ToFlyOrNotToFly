@@ -67,6 +67,8 @@
   .compass{flex:0 0 130px}
   .hint{color:var(--muted);font-size:12px;margin-top:8px}
   .warn{color:#ffb454}
+  .windy-frame{position:relative;width:100%;height:520px;border-radius:10px;overflow:hidden;border:1px solid var(--line);background:var(--panel2)}
+  .windy-frame iframe{width:100%;height:100%;border:0;display:block}
   .verdict{border-radius:16px;padding:18px 20px;margin-bottom:18px;border:1px solid var(--line);
     display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap}
   .verdict .badge{font-size:30px;font-weight:800;letter-spacing:.5px;padding:10px 20px;border-radius:12px;color:#04101f;white-space:nowrap}
@@ -182,6 +184,12 @@
     </div>
   </div>
 
+  <div class="card" id="windyCard" style="margin-top:16px">
+    <h2>Windy forecast &amp; meteogram — FAVG</h2>
+    <div class="windy-frame"><iframe id="windyFrame" title="Windy meteogram for Virginia (FAVG)" loading="lazy" allowfullscreen></iframe></div>
+    <div class="hint">Interactive wind forecast and meteogram for Virginia (FAVG), ECMWF model via Windy. Reloads with each dashboard refresh. <a id="windyLink" href="https://www.windy.com/airport/FAVG?-29.771,31.058,11,p:wind" target="_blank" rel="noopener">Open the full meteogram on Windy ↗</a></div>
+  </div>
+
   <h2 style="margin:24px 2px 6px;color:var(--muted);font-size:13px;letter-spacing:.7px;text-transform:uppercase">METAR &amp; TAF</h2>
   <div class="grid" id="stations"></div>
 
@@ -208,12 +216,14 @@ const RWYS = [{name:"05", hdgMag:50, hdgTrue:50-VAR_W},{name:"23", hdgMag:230, h
 const VERDICT_STATION = "FALE";   // nearest station with a TAF (King Shaka)
 const VERDICT_HOURS = 3;
 const REFRESH_MS = 5*60*1000;
+const WINDY = {lat:-29.771, lon:31.058, zoom:11};
 
 let metars = {}, tafs = {};
 
 // ---------- helpers ----------
 const $ = id => document.getElementById(id);
 const pad = n => String(n).padStart(2,"0");
+const hpaToMmhg = h => (h==null?null:Math.round(h*0.750062));   // QNH hPa -> mmHg
 function clocks(){
   const now = new Date();
   const z = new Date(now.getTime());
@@ -236,14 +246,17 @@ function withTimeout(p, ms){
   return Promise.race([p, new Promise((_,rej)=>setTimeout(()=>rej(new Error("timeout")),ms))]);
 }
 // each entry builds a request URL and extracts JSON from the (possibly wrapped) response
+const isLocalHost = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
 const PROXIES = [
-  {name:"local",        url:u=>"/proxy?url="+encodeURIComponent(u),                            parse:async r=>r.json()},
   {name:"direct",       url:u=>u,                                                              parse:async r=>r.json()},
   {name:"corsproxy.io", url:u=>"https://corsproxy.io/?url="+encodeURIComponent(u),             parse:async r=>r.json()},
   {name:"codetabs",     url:u=>"https://api.codetabs.com/v1/proxy/?quest="+u,                  parse:async r=>r.json()},
   {name:"allorigins",   url:u=>"https://api.allorigins.win/get?url="+encodeURIComponent(u),    parse:async r=>JSON.parse((await r.json()).contents)},
   {name:"isomorphic",   url:u=>"https://cors.isomorphic-git.org/"+u,                            parse:async r=>r.json()}
 ];
+// served by the local PowerShell launcher? the same-origin proxy is fastest there, so try it first.
+// on a hosted (https) site this path 404s, so we skip it to avoid a wasted round-trip.
+if(isLocalHost) PROXIES.unshift({name:"local", url:u=>"/proxy?url="+encodeURIComponent(u), parse:async r=>r.json()});
 async function getJSON(url){
   let lastErr;
   for(const p of PROXIES){
@@ -262,11 +275,26 @@ function showOverlay(on,msg){
   const o=$("overlay"); if(msg) $("ldtxt").textContent=msg;
   o.classList.toggle("show", on);
 }
+let lastWindy=0;
+function refreshWindy(force){
+  const f=$("windyFrame"); if(!f) return;
+  if(!force && Date.now()-lastWindy < 4*60*1000) return;   // throttle to avoid flicker on frequent refreshes
+  lastWindy=Date.now();
+  const p=new URLSearchParams({
+    lat:WINDY.lat, lon:WINDY.lon, detailLat:WINDY.lat, detailLon:WINDY.lon,
+    zoom:WINDY.zoom, level:"surface", overlay:"wind", product:"ecmwf",
+    menu:"", message:"", marker:"true", calendar:"now", pressure:"",
+    type:"map", location:"coordinates", detail:"true",
+    metricWind:"kt", metricTemp:"°C", radarRange:"-1"
+  });
+  f.src="https://embed.windy.com/embed2.html?"+p.toString();
+}
 let loading=false;
 async function loadData(){
   if(loading) return; loading=true;
-  showOverlay(true,"Fetching live weather…");
-  setStatus(true,"Fetching METARs & TAFs…");
+  const haveData = Object.keys(metars).length>0;
+  if(!haveData) showOverlay(true,"Fetching live weather…");   // full overlay only on first load
+  setStatus(true, haveData?"Refreshing…":"Fetching METARs & TAFs…");
   try{
     const [m,t] = await Promise.all([
       getJSON("https://aviationweather.gov/api/data/metar?ids="+ids+"&format=json"),
@@ -276,9 +304,11 @@ async function loadData(){
     (m||[]).forEach(o=>metars[o.icaoId]=o);
     (t||[]).forEach(o=>tafs[o.icaoId]=o);
     render();
+    refreshWindy();
     setStatus(true,"Live");
     $("lastUpd").textContent = "Last updated "+new Date().toLocaleTimeString();
     $("errBox").innerHTML="";
+    try{ localStorage.setItem("flywx",JSON.stringify({metars,tafs,ts:Date.now()})); }catch(e){}
   }catch(e){
     setStatus(false,"Could not reach weather service");
     $("errBox").innerHTML='<div class="card" style="border-color:#7a2f2f"><p class="err">'+
@@ -318,7 +348,7 @@ function decodeMetar(o){
   t.push(["Cloud", cloudText(o.clouds)]);
   if(o.temp!=null) t.push(["Temperature", o.temp+" °C"]);
   if(o.dewp!=null) t.push(["Dewpoint", o.dewp+" °C"]);
-  if(o.altim!=null) t.push(["QNH", Math.round(o.altim)+" hPa"]);
+  if(o.altim!=null) t.push(["QNH", hpaToMmhg(o.altim)+" mmHg ("+Math.round(o.altim)+" hPa)"]);
   return t;
 }
 function fmtZ(epoch){ const d=new Date(epoch*1000); return pad(d.getUTCDate())+" "+pad(d.getUTCHours())+pad(d.getUTCMinutes())+"Z"; }
@@ -546,8 +576,8 @@ function renderDA(){
   $("paVal").textContent=Math.round(pa)+" ft";
   $("daVal").textContent=da+" ft";
   $("tdVal").textContent=oat+" / "+(m.dewp!=null?m.dewp:"—")+" °C";
-  $("qnhVal").textContent=Math.round(qnh)+" hPa";
-  $("daHint").textContent="From "+icao+" QNH "+Math.round(qnh)+" hPa & "+oat+"°C at field elev "+elev+" ft. Higher DA = degraded performance.";
+  $("qnhVal").textContent=hpaToMmhg(qnh)+" mmHg";
+  $("daHint").textContent="From "+icao+" QNH "+hpaToMmhg(qnh)+" mmHg ("+Math.round(qnh)+" hPa) & "+oat+"°C at field elev "+elev+" ft. Higher DA = degraded performance.";
 }
 
 // ---------- sun times (NOAA algorithm) ----------
@@ -596,6 +626,13 @@ $("refreshBtn").onclick=()=>loadData();
 let timer=null;
 function arm(){ if(timer) clearInterval(timer); if($("autoChk").checked) timer=setInterval(loadData,REFRESH_MS); }
 $("autoChk").onchange=arm;
+// instant display from last cached data, then refresh live in the background
+try{
+  const cached=JSON.parse(localStorage.getItem("flywx")||"null");
+  if(cached && cached.metars){ metars=cached.metars; tafs=cached.tafs||{}; render();
+    setStatus(true,"Showing last data — refreshing…"); $("lastUpd").textContent="Cached "+new Date(cached.ts).toLocaleTimeString(); }
+}catch(e){}
+refreshWindy(true);
 loadData(); arm();
 // refresh when tab regains focus (components update on their own cadence)
 document.addEventListener("visibilitychange",()=>{ if(!document.hidden) loadData(); });
